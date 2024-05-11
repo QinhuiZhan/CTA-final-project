@@ -1,0 +1,790 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+
+Research Title: What Influences the Sentiment of Political Speeches in UK parliament: Topic, Party, and Position 
+
+Research Purpose: This study aims to explore the sentiment changes across time during the period of Brexit Vote,and how parties,topics and features of MPs (positions) affect their sentiment strategy.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#library setting
+```{r library}
+library(gridExtra)
+library(tidyverse) 
+library(stringr) 
+library(tidytext) 
+library(topicmodels) 
+library(scales)
+library(tm)
+library(ggthemes) 
+library(readr)
+library(quanteda)
+library(quanteda.textmodels)
+library(preText)
+library(wordcloud)
+library(wordcloud2)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(sentimentr)
+library(RColorBrewer)
+library(ldatuning)
+library(textrecipes)
+library(workflows)
+library(discrim)
+library(glmnet)
+library(rsample)
+library(tune)
+library(yardstick)
+```
+
+
+#data clean and preparation
+```{r data clean}
+#input the original data
+data  <- read.csv("C:/Learn/Edinburgh/CTA/Final/Dataset/uk_data.csv")
+
+
+##select necessary variables and cases
+data <- data %>%
+  select(period,last_name,first_name,date,top_topic,
+         female,age,leader,prime_minister,senior_minister,
+         shadow,cabinet,chair,government,party,words,text) %>% #select the variables we need
+  rename(lastname = last_name, 
+         firstname = first_name,
+         topic = top_topic)                                    #rename columns
+
+
+#delete the missing cases and meaningless cases
+data <- data %>% filter(!is.na(topic)) %>% droplevels()
+data <- data %>% filter(topic != "no topic") %>% droplevels()
+data <- data %>% filter(party != "others") %>% droplevels()
+data <- data[complete.cases(data), ]
+
+
+#remove the speeches with less than 100 characters
+data <- data[data$words > 100, ]  
+
+
+#select the speeches after the announcement of the Brexit referendum
+data$dates <- as.Date(data$date)
+#decide the range of interested period
+start_date <- as.Date("2015-05-27") #the day announced the Brexit referendum
+end_date <- as.Date("2017-06-23") #one year after the Brexit vote
+# create condition
+condition <- data$dates >= start_date & data$dates <= end_date
+# select the speeches with condition
+data<- data[condition, ]
+
+
+#add a column of serial number
+data$speech_id <- seq_len(nrow(data))
+
+
+#create a region variable to classify the parties in UK 
+data <- data %>%
+  mutate(region = case_when(
+    party %in% c("Conservative", "Labour", "Liberal Democrats", "Green") ~ "England",
+    party %in% c("Scottish National Party") ~ "Scotland",
+    party %in% c("Plaud Cymru") ~ "Wales",
+    party %in% c("Democratic Unionist Party", "Ulster Unionist Party") ~ "Northern Ireland",
+    party %in% c("Others") ~ NA,
+    TRUE ~ NA  
+  ))  
+
+#deal with the empty string 
+empty_strings <- data[data$topic == "", ] #Subset rows with empty "topic"
+data$topic[data$topic == ""] <- NA    # Replace empty strings with NA in "topic" column
+data <- data[!is.na(data$topic), ]       # Remove rows with NA in "topic"
+
+#delete the missing cases
+data <- data[complete.cases(data), ]
+
+# create a time variable for monthly dates
+data$time <- NA  # create an empty column
+# 2015
+data$time[data$date >= as.Date("2015-05-01") & data$date <= as.Date("2015-05-31")] <- "15/05"
+data$time[data$date >= as.Date("2015-06-01") & data$date <= as.Date("2015-06-30")] <- "15/06"
+data$time[data$date >= as.Date("2015-07-01") & data$date <= as.Date("2015-07-31")] <- "15/07"
+data$time[data$date >= as.Date("2015-08-01") & data$date <= as.Date("2015-08-31")] <- "15/08"
+data$time[data$date >= as.Date("2015-09-01") & data$date <= as.Date("2015-09-30")] <- "15/09"
+data$time[data$date >= as.Date("2015-10-01") & data$date <= as.Date("2015-10-31")] <- "15/10"
+data$time[data$date >= as.Date("2015-11-01") & data$date <= as.Date("2015-11-30")] <- "15/11"
+data$time[data$date >= as.Date("2015-12-01") & data$date <= as.Date("2015-12-31")] <- "15/12"
+# 2016
+data$time[data$date >= as.Date("2016-01-01") & data$date <= as.Date("2016-01-31")] <- "16/01"
+data$time[data$date >= as.Date("2016-02-01") & data$date <= as.Date("2016-02-29")] <- "16/02"
+data$time[data$date >= as.Date("2016-03-01") & data$date <= as.Date("2016-03-31")] <- "16/03"
+data$time[data$date >= as.Date("2016-04-01") & data$date <= as.Date("2016-04-30")] <- "16/04"
+data$time[data$date >= as.Date("2016-05-01") & data$date <= as.Date("2016-05-31")] <- "16/05"
+data$time[data$date >= as.Date("2016-06-01") & data$date <= as.Date("2016-06-30")] <- "16/06"
+data$time[data$date >= as.Date("2016-07-01") & data$date <= as.Date("2016-07-31")] <- "16/07"
+data$time[data$date >= as.Date("2016-08-01") & data$date <= as.Date("2016-08-31")] <- "16/08"
+data$time[data$date >= as.Date("2016-09-01") & data$date <= as.Date("2016-09-30")] <- "16/09"
+data$time[data$date >= as.Date("2016-10-01") & data$date <= as.Date("2016-10-31")] <- "16/10"
+data$time[data$date >= as.Date("2016-11-01") & data$date <= as.Date("2016-11-30")] <- "16/11"
+data$time[data$date >= as.Date("2016-12-01") & data$date <= as.Date("2016-12-31")] <- "16/12"
+# 2017
+data$time[data$date >= as.Date("2017-01-01") & data$date <= as.Date("2017-01-31")] <- "17/01"
+data$time[data$date >= as.Date("2017-02-01") & data$date <= as.Date("2017-02-28")] <- "17/02"
+data$time[data$date >= as.Date("2017-03-01") & data$date <= as.Date("2017-03-31")] <- "17/03"
+data$time[data$date >= as.Date("2017-04-01") & data$date <= as.Date("2017-04-30")] <- "17/04"
+data$time[data$date >= as.Date("2017-05-01") & data$date <= as.Date("2017-05-31")] <- "17/05"
+data$time[data$date >= as.Date("2017-06-01") & data$date <= as.Date("2017-06-30")] <- "17/06"
+
+data$year[data$date >= as.Date("2015-05-27") & data$date <= as.Date("2016-06-23")] <- "Year 1"
+data$year[data$date >= as.Date("2016-06-24") & data$date <= as.Date("2017-06-23")] <- "Year 2"
+
+#token
+data2 <- data %>% 
+  mutate(desc = tolower(text)) %>%    #create a new column with lowercase text from "tweet"
+  unnest_tokens(word, desc) %>%        #token the text from text into individual word
+  filter(str_detect(word, "[a-z]"))%>% #keep only the words.
+  anti_join(stop_words)                #remove stop words
+
+```
+
+
+#Sentiment Analysis
+First, we prepare the dataset for sentiment analysis. Specifically, we combine the "afinn" dictionary with our tokened dataset to get the sentiment value of the words.
+
+##sentiment dataset
+```{r dictionary}
+#import the sentiment dictionary ("afinn")
+afinn_dict <- get_sentiments("afinn")
+
+#prepare the dataset for calculating sentiment score
+afinn_tweets <- data2 %>%
+  select(speech_id,dates,topic,words,word,party,region,text,leader,time,
+         prime_minister,senior_minister,shadow,cabinet,chair,government,)%>% 
+  #get the necessary variables
+  inner_join(afinn_dict, by= join_by(word))%>%                       
+  #combine the dataset with dictionary based on word
+  mutate(sentiment = value)                                          
+  #assign the words with sentiment value from the "afinn" dictionary
+```
+
+
+##calculate the sentiment score
+```{r calculate the sentiment score for each speech}
+#get tweet sentiment by speech_id
+tweets_afinn_sentiment <- afinn_tweets %>%
+  group_by(speech_id)%>%                                       #group the rows by speech_id 
+  mutate(sentiment_score = sum(sentiment))    #calculate the sentiment score of a speech by adding all scores of words
+  
+#get the unique value of sentiment score for each speech
+unique_sentiment <- tweets_afinn_sentiment %>%
+distinct(speech_id, .keep_all = TRUE)                        
+ 
+
+#get the merged dataset
+merged_afinn_data <- data %>%
+  left_join(unique_sentiment[, c("speech_id", "sentiment_score")], by = "speech_id")  %>%       #add the column "sentiment_score" in unique_sentiment to the data3
+  na.omit(merged_afinn_data)
+```
+
+
+
+##plot the frequency of positive and negative across time
+We are interested to find whether the political speeches are more positive or negative, therefore, we explore the frequency of the two types of words used acorss time.
+
+```{r Frequency of Positive and Negative Words}
+# Calculate the frequency of positive and negative words
+positive_freq <- afinn_tweets %>%
+  filter(sentiment > 0) %>%
+  group_by(time) %>%
+  summarize(positive_count = n())
+
+negative_freq <- afinn_tweets %>%
+  filter(sentiment < 0 ) %>%
+  group_by(time) %>%
+  summarize(negative_count = n())
+
+
+# Merge the positive and negative frequencies
+merged_freq <- merge(positive_freq, negative_freq, by = "time", all = TRUE)
+
+# Create cumulative bar chart function with percentage labels
+create_cumulative_plot <- function(data, y1, y2, color1, color2) {
+  plot <- ggplot(data, aes(x = time)) +  # Create ggplot object with time on x-axis
+    geom_bar(aes(y = .data[[y1]], fill = "Positive"), stat = "identity", alpha = 0.7, position = position_stack()) +  # Bar chart for the first variable with stacking
+    geom_bar(aes(y = .data[[y2]], fill = "Negative"), stat = "identity", alpha = 0.7, position = position_stack()) +  # Bar chart for the second variable with stacking
+    geom_text(aes(y = .data[[y1]] + .data[[y2]]/1.05, label = paste0(round((.data[[y2]]/(.data[[y1]] + .data[[y2]]))*100), "%")), position = position_stack(vjust = 0.5), size = 3, color = "black") +  # Add text labels with percentages for positive counts
+    geom_text(aes(y = .data[[y1]] /2 , label = paste0(round((.data[[y1]]/(.data[[y1]] + .data[[y2]]))*100), "%")), position = position_stack(vjust = 0.5), size = 3, color = "black") +  # Add text labels with percentages for negative counts
+    labs(x = "Time", y = "Frequency") +  # Label x-axis as "Time" and y-axis as "Frequency"
+    scale_fill_manual(values = c("Positive" = color1, "Negative" = color2),  # Set fill colors manually and add labels
+                      name = "Category",  # Set legend title
+                      labels = c("Positive", "Negative")) +  # Set legend labels
+    theme_minimal() +  # Use minimal theme
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),  # Rotate x-axis labels by 45 degrees, set font size to 8
+          legend.position = "right",  # Place legend on the right
+          plot.margin = margin(10, 50, 10, 50))  # Adjust plot margin to increase width
+  return(plot)
+}
+
+# Create cumulative bar chart
+cumulative_plot <- create_cumulative_plot(merged_freq, "positive_count", "negative_count", "#30638E", "#84A98C")
+
+# Show cumulative plot
+print(cumulative_plot)
+
+
+
+```
+According to the plot, it is evident that political speeches tend to exhibit a higher frequency of positive emotions compared to negative ones. Interestingly, the period surrounding the announcement of the Brexit referendum emerges as the most positive phase for speeches delivered by parliamentary members.
+
+
+To delve deeper into the trend, we also plotted the overall sentiment score over time.
+##plot the overall sentiment scores across time
+```{r plot the sentiment change across time}
+#create a dataset with the total score of each date
+sentiment_dates <- merged_afinn_data %>%
+  group_by(dates) %>%
+  mutate(Sentiment_Score = mean(sentiment_score))
+
+
+#plot the emotive scores between different region across time
+ggplot(sentiment_dates, aes(x = dates, y = Sentiment_Score)) +
+  geom_point(alpha=0.25,color = "#403d39") +  
+  geom_smooth(method= loess,aes(color = "Trend"),alpha=0.5)+   
+  geom_vline(xintercept = as.numeric(as.Date("2015-05-27")), color = "red",alpha=0.25,linewidth=3) +
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-23")), color = "orange",alpha=0.25,linewidth=3) +
+  labs(x = "Time", y = "Sentiment Score", title = "Overall Sentiment Scores Across Time") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"),  # Set color of x-axis labels to black
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white"),  # Remove background color
+  )+
+  scale_color_brewer(palette = "Set2")
+```
+The red block represents the period when the Brexit referendum was announced, while the yellow block denotes the official start of the Brexit vote. According to the plot, we can observed that both periods showed a higher sentiment scores of speeches. After that, the sentiment scores tend not to be big swings.
+
+Then we want to compare the difference of sentiment in two years. Year 1 spans from May 23, 2015, to June 23, 2016, encompassing the period from the announcement of the Brexit Vote to the actual Brexit Vote date. Year 2 extends from June 24, 2016, to June 23, 2017, representing the year following the Brexit Vote.
+```{r Sentiment scores of two years}
+# Extract data for Year 1
+sentiment_year1 <- merged_afinn_data %>%
+ filter(year == "Year 1")  %>%
+ group_by(time) %>%
+ mutate(Sentiment_Score = mean(sentiment_score)) %>%
+ distinct(time, .keep_all = TRUE)
+
+# Extract data for Year 2
+sentiment_year2 <- sentiment_dates %>%
+  filter(year == "Year 2") %>%
+  group_by(time) %>%
+  mutate(Sentiment_Score = mean(sentiment_score)) %>%
+  distinct(time, .keep_all = TRUE)  
+  
+# Plot the emotive scores between different region across time for Year 1
+plot1 <- ggplot(sentiment_year1, aes(x = time, y = Sentiment_Score)) +
+  geom_col(alpha=0.75, fill = "lightblue") +     
+  labs(x = "Time", y = "Sentiment Score", title = "Year 1") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"), 
+    axis.text.y = element_text(color = "black"))
+  
+# Plot the emotive scores between different region across time for Year 2
+plot2 <- ggplot(sentiment_year2, aes(x = time, y = Sentiment_Score)) +
+  geom_col(alpha=0.75, fill = "darkblue") +  
+  labs(x = "Time", y = "Sentiment Score", title = "Year 2") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"),  
+    axis.text.y = element_text(color = "black"))+
+  ylim(0,15)
+  
+# Arrange plots side by side
+grid.arrange(plot1, plot2, ncol = 2)
+```
+The plot illustrates a decline in the sentiment of speeches over time. The highest sentiment score occurred in June of Year 1, the month following the announcement of the exact date of the Brexit Vote. Furthermore, the second highest peak in sentiment score was observed in May 2015, the month closest to the Brexit Vote.
+
+The highest sentiment score in Year 1 is nearly three times that of Year 2. This discrepancy may be correlated with politicians' increased efforts to utilize sentiment in speeches to potentially influence public opinion in favor of their respective agendas, particularly during the lead-up to the Brexit Vote.
+
+
+
+To investigate the underlying reasons, we explore the relationship between parties, topics and features of MPs (Positions) with the sentiment scores of political speeches.
+
+##Regression
+
+We estimate these relationships with the OLS regression for statistical evidence.
+
+```{r descriptive staticstics}
+#age
+summary(data$age)
+sd(data$age)
+
+#sentiment score
+summary(merged_afinn_data$sentiment_score)
+sd(merged_afinn_data$sentiment_score)
+
+# Define the variables to iterate over
+variables <- c("female", "topic", "party", "leader","prime_minister","senior_minister","shadow", "cabinet", "chair")
+
+# Iterate over each variable
+for (variable in variables) {
+  # Calculate frequency table
+  variable_frequency <- table(data[[variable]])
+  # Calculate total observations
+  total_obs <- sum(variable_frequency)
+  # Calculate proportion
+  variable_proportion <- variable_frequency / total_obs
+  # Print frequency
+  cat("Frequency table for", variable, ":\n")
+  print(variable_frequency)
+  # Print proportion
+  cat("Proportion for", variable, ":\n")
+  print(variable_proportion)
+  cat("\n")
+}
+
+```
+
+```{r regression}
+# Select relevant columns from the merged data
+reg_data <- merged_afinn_data %>%
+  select(speech_id, topic, female, leader, prime_minister, senior_minister,shadow, cabinet, chair, age, party, words, dates, sentiment_score) 
+
+#convert topic and party into factor variable for regression
+reg_data$topic <- factor(reg_data$topic)
+reg_data$party <- factor(reg_data$party)
+
+# Fit linear regression models to predict sentiment score
+Result_Reg1 <- lm(sentiment_score ~   age +female , data = reg_data)
+
+Result_Reg2 <- lm(sentiment_score ~ age +female  + topic , data = reg_data)
+
+Result_Reg3 <- lm(sentiment_score ~  age +female  + party , data = reg_data)
+
+Result_Reg4 <- lm(sentiment_score ~  age +female  + leader + prime_minister + senior_minister + shadow + cabinet + chair , data = reg_data)
+
+Result_Reg5 <- lm(sentiment_score ~  age +female  + topic +  party + leader + prime_minister + senior_minister + shadow + cabinet + chair , data = reg_data)
+
+# Display summary statistics of the linear regression model
+summary(Result_Reg5)
+```
+The final model demonstrated a best R-squared of 0.121, indicating the best predictive power on the sentiment scores. The findings indicate a significant relationship between the sentiment scores of political speeches and factors such as party affiliation, topic, age, and position of PMs. 
+
+Subsequently, we proceeded to elucidate and investigate the relationship between each factor and sentiment scores individually.
+
+
+
+## Topics and Sentiment 
+
+First and foremost, we aimed to gain insights into the content of each topic. Given that these seven topics are relatively broad, understanding their constituent words can provide clarity. Therefore, wordclouds of each topic are drawn.
+##word clouds of each topic
+```{r word clouds}
+# Group the data by 'topic'
+grouped_data <- data2 %>%
+  group_by(topic)
+
+# Loop through each group to generate word clouds
+for (group_name in unique(data2$topic)) {
+  # Extract data for the current group
+  group_data <- filter(data2, topic == group_name)
+  
+  # Calculate word frequencies for the current group
+  word_freq <- group_data %>%
+    count(word) %>%
+    arrange(desc(n))
+  
+  # Set the filename for saving the image
+  filename <- paste0("wordcloud_", group_name, ".png")
+  
+  # Open a png plotting device
+  png(filename, width = 800, height = 600)  # Set image dimensions
+  
+  # Generate word cloud for the current group
+  wordcloud(words = word_freq$word, freq = word_freq$n, min.freq = 5, random.order = FALSE, 
+            colors = brewer.pal(8, "Dark2"), main = group_name)
+  
+  # Close the png plotting device
+  dev.off()
+}
+```
+
+This page is limited to present the word clouds, therefore I store it in the local file. According to  the word cloud, words like government, people, hon, m with the biggest frequency appeared most almost every topic.  It's reasonable as the political speeches in Parliament follow some rules. 
+
+Instead, we could figure out what the topic talked about by other frequent words. Specifically, words like "health", "children", "support", "nhs" appeared more frequently in the topic of "welfare and quality of life". 
+
+After acknowledging the content of each topic, we investigate the relationship between topics and sentiment scores.
+
+###plot the sentiment scores by topics 
+```{r topics of speeches}
+
+#create a data frame for exploring the overall sentiment scores
+sentiment_scores_topic <- merged_afinn_data %>%
+  group_by(topic) %>%
+  summarize(Sentiment_Score = mean(sentiment_score))
+
+#deal with the empty string 
+empty_strings <- sentiment_scores_topic[sentiment_scores_topic$topic == "", ] #Subset rows with empty "topic"
+sentiment_scores_topic$topic[sentiment_scores_topic$topic == ""] <- NA    # Replace empty strings with NA in "topic" column
+sentiment_scores_topic <- sentiment_scores_topic[!is.na(sentiment_scores_topic$topic), ]       # Remove rows with NA in "topic"
+
+
+# Custom color palette
+custom_colors <- c("#ff6b35", "#fcaf58", "#f7c59f", "#80ed99", "#57cc99", "#38a3a5", "#22577a", "#725ac1")
+
+
+# Plot the sentiment scores between different regions
+ggplot(sentiment_scores_topic, aes(x = topic, y = Sentiment_Score, fill = topic)) +
+  geom_bar(stat = "identity", alpha = 0.75, width = 0.5) +  # Adjust width of the bars
+  geom_text(aes(label = round(Sentiment_Score, 2)), vjust = -0.2, size = 3, color = "black") +
+  labs(x = NULL, y = "Sentiment Score", title = "Overall Sentiment Scores Between Topics") +  # Remove x-axis label
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),  # Remove x-axis labels
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white")
+  ) +
+  scale_fill_manual(values = custom_colors)  # Apply custom fill colors
+
+
+
+#create a dataset with the total score of each date
+sentiment_scores_topic <- merged_afinn_data %>%
+  group_by(dates,topic) %>%
+  mutate(Sentiment_Score = mean(sentiment_score))
+
+#deal with the empty string 
+empty_strings <- sentiment_scores_topic[sentiment_scores_topic$topic == "", ] #Subset rows with empty "topic"
+sentiment_scores_topic$topic[sentiment_scores_topic$topic == ""] <- NA    # Replace empty strings with NA in "topic" column
+sentiment_scores_topic <- sentiment_scores_topic[!is.na(sentiment_scores_topic$topic), ]       # Remove rows with NA in "topic"
+
+#plot the emotive scores between different topics across time
+ggplot(sentiment_scores_topic, aes(x = dates, y = Sentiment_Score, color= topic)) +
+  geom_smooth(method= loess,alpha=0.5, fill = NA)+   
+  geom_vline(xintercept = as.numeric(as.Date("2015-05-27")), color="red",alpha=0.25,linewidth=3)+
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-23")), color= "orange",alpha=0.25,linewidth=3)+
+  labs(x = "Time", y = "Sentiment Score", title = "Sentiment Scores Across Time") +
+  theme_minimal() +
+    theme(
+    axis.text.x = element_text(color = "black"),  
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white"),
+  )+
+  scale_color_manual(values = custom_colors) +
+  scale_y_continuous(limits = c(-10, 20), breaks = seq(-10, 20, by = 10))
+
+ggplot(sentiment_scores_topic, aes(x = dates, y = Sentiment_Score, color= topic)) +
+  geom_point(alpha=0.5) +  
+  geom_smooth(method= loess,aes(color = "Trend"),alpha=0.5)+   
+  geom_vline(xintercept = as.numeric(as.Date("2015-05-27")), color="red",alpha=0.25,linewidth=3)+
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-23")), color= "orange",alpha=0.25,linewidth=3)+
+  labs(x = "Time", y = "Sentiment Score", title = "Sentiment Scores Across Time") +
+  theme_minimal() +
+      theme(
+    axis.text.x = element_text(color = "black"),  
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white"),
+  )+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_color_manual(values = custom_colors) +
+  scale_y_continuous(limits = c(-40, 50), breaks = seq(-40, 50, by = 10))+ 
+  facet_wrap(~ topic,ncol = 3)
+
+```
+During the Brexit period, political speeches on economy and political systems, directly tied to Brexit's implications, tended to express optimism, reflecting support for Brexit's perceived economic and political autonomy benefits. In contrast, discussions on societal structure often touched upon complex social challenges and inequalities, leading to more negative sentiments. 
+
+
+Next, we explore the distinctions between parties and sentiment scores.
+
+##Parties and Sentiment 
+```{r All parties in UK}
+#create a dataset with the mean sentiment scores of each party 
+sentiment_scores_party <- merged_afinn_data %>%
+  group_by(party) %>%
+  mutate(Sentiment_Score = mean(sentiment_score))%>%
+  distinct(party, .keep_all = TRUE)        
+
+ggplot(sentiment_scores_party, aes(x = Sentiment_Score, y = party, fill = party)) +
+  geom_col(alpha=0.7) +
+  geom_text(aes(label = round(Sentiment_Score, 2)), hjust = -0.2, size = 3, color = "black") +
+  labs(title = "Average Sentiment Score by Party",
+       x = "Average Sentiment Score",
+       y = "Party") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),  # Remove x-axis labels
+    axis.text.y = element_text(color = "black",size = 10),
+    panel.background = element_rect(fill = "white")
+  )
+
+
+#create a dataset with the mean sentiment scores of each party in each date
+sentiment_scores_party <- merged_afinn_data %>%
+  group_by(dates,party) %>%
+  mutate(Sentiment_Score = mean(sentiment_score))
+
+
+#plot the sentiment scores between different parties across time
+ggplot(sentiment_scores_party, aes(x = dates, y = Sentiment_Score, color= party)) +
+  geom_smooth(method= loess,alpha=0.5,fill = NA)+   
+  geom_vline(xintercept = as.numeric(as.Date("2015-05-27")), color="red",alpha=0.25,linewidth=3)+
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-23")), color= "orange",alpha=0.25,linewidth=3)+ 
+  labs(x = "Time", y = "Sentiment Score", title = "Sentiment Scores Between Parties in UK Across Time") +
+  theme_minimal() +
+    theme(
+    axis.text.x = element_text(color = "black"),  
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white"),  
+  )+
+  scale_y_continuous(limits = c(-10, 20), breaks = seq(-10, 20, by = 5))
+
+
+#plot the sentiment scores between different parties across time
+ggplot(sentiment_scores_party, aes(x = dates, y = Sentiment_Score, color= party)) +
+   geom_point(alpha=0.5) +  
+  geom_smooth(method= loess,aes(color = "Trend"),alpha=0.5,fill = NA)+ 
+  geom_vline(xintercept = as.numeric(as.Date("2015-05-27")), color="red",alpha=0.25,linewidth=3)+
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-23")), color= "orange",alpha=0.25,linewidth=3)+ 
+  labs(x = "Time", y = "Sentiment Score", title = "Sentiment Scores Between Parties in UK Across Time") +
+  theme_minimal() +
+    theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8,color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white"),  
+  )+
+  scale_y_continuous(limits = c(-40, 40), breaks = seq(-40, 40, by = 20))+
+  facet_wrap(~ party)
+
+```
+
+There are a total of eight parties, each displaying a notable variation in sentiment scores across political speeches. The PMs in Conservative party exhibited the highest average sentiment score, while the PMs from Labour party tended to have least emotion when making speeches. 
+
+We are also interested how the sentiment changes across time, especially during the period of Brexit referendum. In the second figure, discerning the significant differences between parties across time proves challenging due to the overlapping lines.
+
+Based on the third plot for each party, we could find all trends of these parties follow a similar pattern, while the extent of their sentiment scores changes are different.
+
+The Conservative Party exhibited robust support for Brexit, emphasizing the reclamation of sovereignty, which translated into predominantly positive sentiments. Conversely, both the Labour Party and the Liberal Democrats advocated for remaining in the EU, voicing apprehensions regarding potential economic and social risks. Consequently, their speeches tended towards the negative or neutral end of the sentiment spectrum. Notably, the Green Party staunchly opposed Brexit, highlighting the environmental benefits of EU membership. As a result, their speeches exhibited the most negative sentiment, particularly following the announcement and initiation of the Brexit Vote.
+
+
+
+To delve deeper into the influence of different parties on this variation, we investigated parties within four distinct regions.
+
+Initially, we categorized parties into four groups based on administrative regions: England, Wales, Scotland, and Northern Ireland. We hypothesized that political discourse and sentiment would exhibit variance based on the administrative and territorial delineations within England, Northern Ireland, Scotland, and Wales.
+
+# Parties in Four Regions and Sentiment Scores
+```{r parties in four regions}
+#create a data frame for exploring the overall sentiment scores
+sentiment_region <- merged_afinn_data %>%
+  group_by(region) %>%
+  summarize(Sentiment_Score = mean(sentiment_score))
+
+# Plot the sentiment scores between different regions 
+plot3 <-  ggplot(sentiment_region, aes(x = Sentiment_Score, y = region, fill = region)) +
+  geom_bar(stat = "identity", alpha = 0.5, width = 0.5) +
+  geom_text(aes(label = round(Sentiment_Score, 2)), hjust = -0.2, size = 3, color = "black") +
+  labs(x = "Sentiment Score", y = "Region", title = "Average Sentiment Scores Between Regions") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"),  
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white")
+  ) +
+  scale_x_continuous(limits = c(0, 15), breaks = seq(0, 15, by = 5))
+
+
+#create a data frame with the total score of each date
+sentiment_region <- merged_afinn_data %>%
+  group_by(dates,region) %>%
+  mutate(Sentiment_Score = mean(sentiment_score))
+
+#plot the sentiment scores between different regions across time
+plot4<- ggplot(sentiment_region, aes(x = dates, y = Sentiment_Score, color = region)) +
+  geom_point(aes(color = region),alpha=0.1) + 
+  geom_smooth(method= loess,fill = NA)+   
+  geom_vline(xintercept = as.numeric(as.Date("2015-05-27")), color = "red",alpha=0.25,linewidth=8 ) +
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-23")), color = "orange",alpha=0.25,linewidth=8) +
+  labs(x = "Time", y = "Sentiment Score", title = " Sentiment Scores Between Regions Across Time") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"),  
+    axis.text.y = element_text(color = "black"),
+    panel.background = element_rect(fill = "white"), 
+  )+
+  scale_y_continuous(limits = c(-30, 30), breaks = seq(-30, 30, by = 10))
+
+```
+According to the bar plot, the sentiment scores range from 0 to 8, suggesting a relatively minor emotional variation in political speeches. Notably, parties in England appear to employ more emotive language compared to those in Scotland, which exhibited the least emotive language use.
+
+In the second plot, all four regions exhibit a similar trend over the observed period, particularly during the preparatory phase leading up to the Brexit vote. Upon comparing regions, it becomes apparent that parties in England and Wales displayed the highest positive sentiment scores since the announcement of the Brexit vote, while Wales expressed the most negative sentiment. However, at the outset of the Brexit vote, Welsh parties demonstrated the most positive emotion. It's worth noting that England consistently maintained the highest positive scores throughout most of the period and PMs from parties in Scotland tend to employ more negative language compared to the other regions.
+
+
+
+
+Next, we delved into the connections between positions and sentiment scores. 
+
+#Positions and Sentiment Scores
+Based on the results of regression, to be a senior minister, a member of shadow and cabinet, and a chair member are significantly related to the sentiment in speeches.
+
+We visualize all these positions in a plot to present the average score of different position and the comparison with the non-position members.
+
+```{r positions of PMs}
+
+# Create an empty data frame to store the mean sentiment scores for each dummy variable when it equals 1
+average_scores <- data.frame()
+
+# Loop through each dummy variable
+for (variable in c("senior_minister", "shadow", "cabinet", "chair")) {
+  # Calculate the mean sentiment score when the current dummy variable equals 1
+  average_score <- merged_afinn_data %>%
+    filter(!!sym(variable) == 1) %>%
+    summarise(mean_score = mean(sentiment_score))
+  
+  # Add the result to the data frame
+  average_scores <- rbind(average_scores, data.frame(variable = variable, mean_score = average_score$mean_score))
+}
+
+# Calculate the mean sentiment score for the control group (when all dummy variables equal 0)
+control_group_score <- mean(merged_afinn_data$sentiment_score[merged_afinn_data$senior_minister == 0 &
+                                                               merged_afinn_data$shadow == 0 &
+                                                               merged_afinn_data$cabinet == 0 &
+                                                               merged_afinn_data$chair == 0])
+
+# Create a data frame including the mean sentiment scores for each dummy variable when it equals 1 and the control group's mean sentiment score
+comparison_data <- rbind(data.frame(variable = "non-position", mean_score = control_group_score), average_scores)
+
+# Reorder the levels of the "variable" factor to place the control group on the leftmost column
+comparison_data$variable <- factor(comparison_data$variable, levels = c("non-position", "senior_minister", "shadow", "cabinet", "chair"))
+
+# Plot the bar chart
+ggplot(comparison_data, aes(x = variable, y = mean_score, fill = variable)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(mean_score, 2)), vjust = -0.2, size = 3, color = "black") +
+  labs(x = "Variable", y = "Mean Sentiment Score", title = "Average Sentiment Scores by Positions") +
+  theme_minimal() +
+  scale_fill_manual(values = c("#eabfcb", "#c191a1", "#a4508b", "#5f0a87", "#2f004f"))  # Set fill colors, grey for the control group
+
+```
+
+
+
+
+#Validation
+
+The next step would now be to validate the results. 
+
+A first basic comparison would be to plot the words that contribute much to the classification into the respective category. The contribution of a word is here operationalized as its sentiment value times its occurrence.
+
+## basic comparison
+```{r contribution barchart}
+# Calculate the top 10 words with the highest positive sentiment contribution
+pos_contribution <- afinn_tweets %>%
+  group_by(word) %>% # Group by word
+  summarize(contribution = sum(value))%>% # Calculate sentiment contribution for each word
+  slice_max(contribution, n = 10)# Select the top 10 words with highest contribution
+
+
+# Calculate the top 10 words with the lowest negative sentiment contribution
+neg_contribution <- afinn_tweets %>% 
+  group_by(word) %>%  # Group by word
+  summarize(contribution = sum(value))%>% # Calculate sentiment contribution for each word
+  slice_min(contribution, n = 10) # Select the top 10 words with lowest contribution
+
+
+#draw the plot of contribution
+bind_rows(
+  pos_contribution %>% mutate(dic = "AFINN"),  # Combine positive contributions, tagging them with "AFINN"
+  neg_contribution %>% mutate(dic = "AFINN")   # Combine negative contributions, tagging them with "AFINN"
+) %>%
+  mutate(word = reorder_within(word, contribution, dic)) %>%  # Reorder words within each facet (positive/negative) based on their contribution
+  ggplot() +
+  geom_col(aes(contribution, word), show.legend = FALSE) +  # Create a column chart comparing word contributions, with legend hidden
+  scale_y_reordered() +  # Scale y-axis to accommodate reordering
+  facet_wrap(vars(dic), scales = "free")  # Split the graph into two panels (positive/negative) 
+
+```
+
+The bar chart indicates that words with positive contribution values reflect positive attributes, while those with negative values denote negative attributes. This implies a degree of reliability in estimating the mood of political speeches using the AFINN Dictionary.
+
+Moreover, a high contribution value suggests a significant impact on the overall sentiment of the text. For example, high emotional contribution values for words like "hope" and "opportunity" in a political speech may indicate an emphasis on optimistic expectations and future opportunities. Conversely, elevated contribution values for negative emotions such as "abuse" and "crime" may signal a strong condemnation of such behaviors in the speech.
+
+
+
+Following the analysis of the bar chart, manual annotation validation was conducted to corroborate the reliability of sentiment estimation methods and gain deeper insights into the accuracy of the sentiment contributions observed.
+
+## Manual Annotation Validation
+
+### The annotation dataset
+
+First, I got a new dataset with 100 rows randomly selected from the original dataset and stored it to local file. Subsequently, I read the text of all these 100 speeches and assign it with the sentiment label.
+
+```{r get random sample}
+# Sampling 100 rows from the data dataframe without replacement
+sampled_data <- data %>% sample_n(size = 100, replace = FALSE)
+
+# Add a column for annotation
+sampled_data$sentiment_label <- NA  # Add a column for manual annotation, initial value set to NA
+
+# Save the data with the annotation column as a CSV file
+write.csv(sampled_data, "annotated_data.csv", row.names = FALSE)
+```
+
+
+### Calculate the performance metrics
+```{r performance metrics}
+# Load the CSV file containing manual annotations
+manual_annotations <- read.csv("C:/Learn/Edinburgh/CTA/Final/Dataset/annotated_data_new.csv")
+
+# Generate predicted labels based on sentiment score
+merged_afinn_data$predicted_label <- ifelse(merged_afinn_data$sentiment_score < 0, "negative", "positive")
+
+# Select the rows from merged_afinn_data that match the samples in manual_annotations
+matched_rows <- merged_afinn_data[merged_afinn_data$speech_id %in% manual_annotations$speech_id, ]
+
+# create the confusion matrix
+conf_matrix <- table(matched_rows$predicted_label, manual_annotations$sentiment_label)
+
+# Calculate accuracy
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+
+# Calculate precision
+precision <- conf_matrix["positive", "positive"] / sum(conf_matrix["positive", ])
+
+# Calculate recall
+recall <- conf_matrix["positive", "positive"] / sum(conf_matrix[, "positive"])
+
+# Calculate F1-score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Create a dataframe for the results
+results_df <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F1-score"),
+  Value = c(accuracy, precision, recall, f1_score)
+)
+
+# Print the table
+kable(results_df, caption = "Performance Metrics")
+
+# Convert the confusion matrix to a dataframe
+conf_matrix_df <- as.data.frame(conf_matrix)
+
+# Create the heatmap
+heatmap <- ggplot(data = conf_matrix_df, aes(x = Var1, y = Var2)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  geom_text(aes(label = Freq), vjust = 1.5, color = "white") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(title = "Confusion Matrix Heatmap", x = "Actual", y = "Predicted")
+
+# Display the heatmap
+print(heatmap)
+```
+
+The analysis of the sentiment analysis model's performance reveals valuable insights. With an accuracy of 74%, the model correctly predicts sentiments in the majority of cases. However, precision, indicating the proportion of correctly predicted positive sentiments among all predicted positives, is relatively lower at 71%. On the other hand, the recall rate is high at 89%, indicating the model's ability to capture the majority of actual positive sentiments. The F1-score, a combined measure of precision and recall, stands at 0.79, suggesting a balanced performance overall. These metrics collectively underscore the model's competency in discerning sentiments, albeit with some room for improvement in precision.
+
+The observed performance metrics may be attributed to the inherent challenge of detecting nuanced sentiments in political speeches, where emotions are often subtle and context-dependent. This suggests that the AFINN lexicon, while widely used, may not be optimally suited for capturing the complexities of political discourse. 
+
+
+
